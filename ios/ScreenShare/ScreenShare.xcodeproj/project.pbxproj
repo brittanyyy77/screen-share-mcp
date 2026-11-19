@@ -1,0 +1,5 @@
+// Xcode project file - create this project in Xcode
+// This is a placeholder. See README for setup instructions.
+// You need to create the project in Xcode with:
+// 1. A main App target
+// 2. A Broadcast Upload Extension target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Screen Share MCP Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/screen-share-mcp/server
+ExecStart=/usr/bin/python3 /root/screen-share-mcp/server/server.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Screen Share Viewer</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        background: #0a0a0a;
+        color: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+    }
+    #header {
+        padding: 16px;
+        text-align: center;
+        width: 100%;
+        background: #111;
+        border-bottom: 1px solid #222;
+    }
+    #header h1 { font-size: 18px; font-weight: 600; }
+    #status {
+        margin-top: 8px;
+        font-size: 13px;
+        color: #888;
+    }
+    #status .active { color: #4ade80; }
+    #status .inactive { color: #f87171; }
+    #screen-container {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        width: 100%;
+    }
+    #screen {
+        max-width: 100%;
+        max-height: calc(100vh - 100px);
+        border-radius: 12px;
+        box-shadow: 0 0 40px rgba(0,0,0,0.5);
+    }
+    #waiting {
+        text-align: center;
+        color: #666;
+    }
+    #waiting .icon { font-size: 48px; margin-bottom: 16px; }
+    #waiting p { font-size: 14px; }
+    #stats {
+        padding: 8px 16px;
+        font-size: 11px;
+        color: #555;
+        text-align: center;
+    }
+    #auth-overlay {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: #0a0a0a;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+    }
+    #auth-form {
+        text-align: center;
+        padding: 32px;
+    }
+    #auth-form h2 { margin-bottom: 16px; font-size: 20px; }
+    #auth-form input {
+        padding: 12px 16px;
+        border-radius: 8px;
+        border: 1px solid #333;
+        background: #1a1a1a;
+        color: #fff;
+        font-size: 14px;
+        width: 280px;
+        margin-bottom: 12px;
+        display: block;
+    }
+    #auth-form button {
+        padding: 12px 32px;
+        border-radius: 8px;
+        border: none;
+        background: #3b82f6;
+        color: #fff;
+        font-size: 14px;
+        cursor: pointer;
+    }
+    #auth-form button:hover { background: #2563eb; }
+    #auth-error { color: #f87171; margin-top: 8px; font-size: 13px; display: none; }
+</style>
+</head>
+<body>
+
+<div id="auth-overlay">
+    <div id="auth-form">
+        <h2>Screen Share Viewer</h2>
+        <input type="password" id="token-input" placeholder="Enter token" />
+        <button onclick="connect()">Connect</button>
+        <div id="auth-error">Connection failed. Check your token.</div>
+    </div>
+</div>
+
+<div id="header">
+    <h1>Live Screen</h1>
+    <div id="status">Connecting...</div>
+</div>
+
+<div id="screen-container">
+    <div id="waiting">
+        <div class="icon">📱</div>
+        <p>Waiting for screen share...</p>
+    </div>
+    <img id="screen" style="display:none" />
+</div>
+
+<div id="stats"></div>
+
+<script>
+let ws = null;
+let frameCount = 0;
+let lastFrameTime = 0;
+let fpsInterval = null;
+
+function connect() {
+    const token = document.getElementById('token-input').value.trim();
+    if (!token) return;
+
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // WebSocket connects to the WS_PORT, viewer page is on HTTP_PORT
+    // If behind reverse proxy, adjust accordingly
+    const wsUrl = `${wsProtocol}//${location.hostname}:9800/viewer`;
+
+    try {
+        ws = new WebSocket(wsUrl);
+    } catch(e) {
+        document.getElementById('auth-error').style.display = 'block';
+        return;
+    }
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({ token: token }));
+    };
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'status') {
+            document.getElementById('auth-overlay').style.display = 'none';
+            updateStatus(data.sharing);
+        }
+
+        if (data.type === 'frame') {
+            const img = document.getElementById('screen');
+            const waiting = document.getElementById('waiting');
+
+            img.src = 'data:image/jpeg;base64,' + data.data;
+            img.style.display = 'block';
+            waiting.style.display = 'none';
+
+            frameCount++;
+            lastFrameTime = Date.now();
+            updateStatus(true);
+        }
+    };
+
+    ws.onclose = () => {
+        updateStatus(false);
+        // Auto reconnect after 3s
+        setTimeout(() => {
+            if (token) connect();
+        }, 3000);
+    };
+
+    ws.onerror = () => {
+        document.getElementById('auth-error').style.display = 'block';
+    };
+
+    // FPS counter
+    if (fpsInterval) clearInterval(fpsInterval);
+    let lastCount = 0;
+    fpsInterval = setInterval(() => {
+        const fps = frameCount - lastCount;
+        lastCount = frameCount;
+        const elapsed = lastFrameTime ? ((Date.now() - lastFrameTime) / 1000).toFixed(1) : '-';
+        document.getElementById('stats').textContent =
+            `Frames: ${frameCount} | FPS: ${fps} | Last frame: ${elapsed}s ago`;
+    }, 1000);
+}
+
+function updateStatus(active) {
+    const el = document.getElementById('status');
+    if (active) {
+        el.innerHTML = '<span class="active">● Live</span>';
+    } else {
+        el.innerHTML = '<span class="inactive">● Offline</span>';
+    }
+}
+
+// Auto-connect if token in URL hash
+if (location.hash) {
+    document.getElementById('token-input').value = location.hash.slice(1);
+    connect();
+}
+
+// Enter key to connect
+document.getElementById('token-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') connect();
+});
+</script>
+</body>
+</html>
