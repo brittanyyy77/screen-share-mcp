@@ -5,85 +5,174 @@ class SampleHandler: RPBroadcastSampleHandler {
     private var webSocket: URLSessionWebSocketTask?
     private var session: URLSession?
     private var isConnected = false
+    private var isAuthenticated = false
     private var frameCount = 0
     private var lastSendTime: TimeInterval = 0
-    private let targetFPS: Double = 15  // 15 frames per second
-    private let jpegQuality: CGFloat = 0.5  // Balance quality vs bandwidth
+    private let targetFPS: Double = 15
+    private let jpegQuality: CGFloat = 0.5
+    private var pingTimer: Timer?
+    private var reconnectAttempts = 0
+    private let maxReconnectAttempts = 5
+    private var serverURL: String = ""
+    private var token: String = ""
+
+    // Reuse CIContext across frames to avoid CPU/battery waste
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
-        // Read config from shared UserDefaults
         let defaults = UserDefaults(suiteName: "group.com.screenshare.app")
-        let serverURL = defaults?.string(forKey: "serverURL") ?? ""
-        let token = defaults?.string(forKey: "token") ?? ""
+        serverURL = defaults?.string(forKey: "serverURL") ?? ""
+        token = defaults?.string(forKey: "token") ?? ""
 
-        guard !serverURL.isEmpty, let url = URL(string: serverURL) else {
+        guard !serverURL.isEmpty else {
             finishBroadcastWithError(NSError(domain: "ScreenShare", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Server URL not configured. Open the app first."]))
             return
         }
 
-        // Connect WebSocket
+        connectWebSocket()
+    }
+
+    private func connectWebSocket() {
+        guard let url = URL(string: serverURL) else {
+            finishBroadcastWithError(NSError(domain: "ScreenShare", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL."]))
+            return
+        }
+
         session = URLSession(configuration: .default)
         webSocket = session?.webSocketTask(with: url)
         webSocket?.resume()
 
-        // Send auth
+        // Send auth and WAIT for server confirmation before sending frames
         let authMsg = ["token": token]
         if let data = try? JSONSerialization.data(withJSONObject: authMsg),
            let str = String(data: data, encoding: .utf8) {
             webSocket?.send(.string(str)) { [weak self] error in
                 if let error = error {
                     print("Auth send error: \(error)")
-                    self?.finishBroadcastWithError(error as NSError)
+                    self?.attemptReconnect()
                 } else {
-                    self?.isConnected = true
-                    self?.receiveMessages()
+                    // Wait for server to confirm auth
+                    self?.waitForAuthConfirmation()
                 }
             }
         }
     }
 
-    override func broadcastPaused() {
-        // User paused
+    private func waitForAuthConfirmation() {
+        webSocket?.receive { [weak self] result in
+            switch result {
+            case .success(let message):
+                switch message {
+                case .string(let text):
+                    if let data = text.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       json["status"] as? String == "connected" {
+                        // Server confirmed auth, now safe to send frames
+                        self?.isConnected = true
+                        self?.isAuthenticated = true
+                        self?.reconnectAttempts = 0
+                        self?.startPingTimer()
+                        self?.receiveMessages()
+                        print("Authenticated and connected")
+                    } else {
+                        // Auth rejected
+                        print("Auth rejected by server")
+                        self?.webSocket?.cancel(with: .goingAway, reason: nil)
+                    }
+                default:
+                    break
+                }
+            case .failure(let error):
+                print("Auth confirmation failed: \(error)")
+                self?.attemptReconnect()
+            }
+        }
     }
 
+    private func attemptReconnect() {
+        guard reconnectAttempts < maxReconnectAttempts else {
+            print("Max reconnect attempts reached")
+            return
+        }
+
+        isConnected = false
+        isAuthenticated = false
+        reconnectAttempts += 1
+        let delay = min(Double(reconnectAttempts) * 2.0, 10.0)
+
+        print("Reconnecting in \(delay)s (attempt \(reconnectAttempts))")
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.webSocket?.cancel(with: .goingAway, reason: nil)
+            self?.connectWebSocket()
+        }
+    }
+
+    private func startPingTimer() {
+        // Send ping every 15 seconds to keep connection alive
+        DispatchQueue.global().async { [weak self] in
+            while self?.isConnected == true {
+                Thread.sleep(forTimeInterval: 15)
+                guard self?.isConnected == true else { break }
+                let pingMsg = ["type": "ping"]
+                if let data = try? JSONSerialization.data(withJSONObject: pingMsg),
+                   let str = String(data: data, encoding: .utf8) {
+                    self?.webSocket?.send(.string(str)) { error in
+                        if let error = error {
+                            print("Ping error: \(error)")
+                            self?.isConnected = false
+                            self?.attemptReconnect()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override func broadcastPaused() {}
+
     override func broadcastResumed() {
-        // User resumed
+        if !isConnected {
+            reconnectAttempts = 0
+            connectWebSocket()
+        }
     }
 
     override func broadcastFinished() {
+        isConnected = false
+        isAuthenticated = false
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
         session = nil
-        isConnected = false
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-        guard sampleBufferType == .video, isConnected else { return }
+        // Only send frames when fully authenticated
+        guard sampleBufferType == .video, isConnected, isAuthenticated else { return }
 
-        // Frame rate limiting
         let now = CACurrentMediaTime()
         let interval = 1.0 / targetFPS
         guard now - lastSendTime >= interval else { return }
         lastSendTime = now
 
-        // Convert CMSampleBuffer to JPEG
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext()
 
-        // Scale down for bandwidth
         let scale = 0.5
         let scaled = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
 
-        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return }
+        // Reuse ciContext instead of creating new one each frame
+        guard let cgImage = ciContext.createCGImage(scaled, from: scaled.extent) else { return }
         let uiImage = UIImage(cgImage: cgImage)
         guard let jpegData = uiImage.jpegData(compressionQuality: jpegQuality) else { return }
 
-        // Send as binary WebSocket message
-        webSocket?.send(.data(jpegData)) { error in
+        webSocket?.send(.data(jpegData)) { [weak self] error in
             if let error = error {
                 print("Frame send error: \(error)")
+                self?.isConnected = false
+                self?.attemptReconnect()
             }
         }
 
@@ -93,12 +182,12 @@ class SampleHandler: RPBroadcastSampleHandler {
     private func receiveMessages() {
         webSocket?.receive { [weak self] result in
             switch result {
-            case .success(let message):
-                // Handle server messages (pong, etc)
-                self?.receiveMessages()  // Continue listening
+            case .success(_):
+                self?.receiveMessages()
             case .failure(let error):
                 print("WebSocket receive error: \(error)")
                 self?.isConnected = false
+                self?.attemptReconnect()
             }
         }
     }
