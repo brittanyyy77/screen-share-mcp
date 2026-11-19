@@ -13,6 +13,10 @@ iOS App (Broadcast Extension) --WebSocket--> VPS Server --WebSocket--> Browser V
 3. VPS forwards frames to a browser-based viewer page
 4. Your AI can also pull the latest frame via MCP tools
 
+## Important
+
+The iOS app is **not** a pre-built download. The repo contains the Xcode project and Swift source code. You need a Mac with Xcode to compile, sign, and install it on your iPhone.
+
 ## Setup
 
 ### 1. VPS Server
@@ -47,15 +51,30 @@ systemctl enable screen-share
 systemctl start screen-share
 ```
 
-### 2. Cloudflare Tunnel (Optional but recommended)
+### 2. Cloudflare Tunnel (recommended for HTTPS/WSS)
 
-Add to your Cloudflare Tunnel config:
+You need both HTTP and WebSocket on the same domain, or use two separate subdomains.
+
+**Option A: Same domain with path routing**
+
+```yaml
+- hostname: screen.yourdomain.com
+  service: http://localhost:9801
+- hostname: screen.yourdomain.com
+  path: /ws/*
+  service: ws://localhost:9800
+```
+
+**Option B: Two subdomains**
+
 ```yaml
 - hostname: screen.yourdomain.com
   service: http://localhost:9801
 - hostname: screen-ws.yourdomain.com
   service: ws://localhost:9800
 ```
+
+If using Option B, enter the WebSocket URL manually in the viewer page.
 
 ### 3. iOS App
 
@@ -73,7 +92,7 @@ Requirements:
    - Product Name: `BroadcastExtension`
    - Bundle Identifier: `com.screenshare.app.broadcast`
 5. Create an **App Group**: `group.com.screenshare.app`
-   - Add it to both the main app and the extension targets
+   - Add it to both the main app and the extension targets under Signing & Capabilities
 
 #### Add the Code
 
@@ -82,13 +101,15 @@ Requirements:
 
 #### Build and Install
 
-1. Connect your iPhone
+1. Connect your iPhone via USB
 2. Select your iPhone as the build target
 3. Build and run (Cmd+R)
 4. Open the app on your phone
-5. Enter your VPS WebSocket URL: `ws://your-vps-ip:9800/phone`
-6. Enter the token from your `.env`
+5. Enter your VPS WebSocket URL: `ws://your-vps-ip:9800/ws/phone` (or `wss://` if using Cloudflare Tunnel)
+6. Enter the same token from your `.env`
 7. Tap the broadcast button, confirm in the system panel
+
+**Note:** iOS will clearly show a "Screen Broadcast" indicator at the top of the screen. This is a system-level feature, not a hidden background recorder. The user must explicitly agree to share.
 
 ### 4. View the Screen
 
@@ -97,12 +118,14 @@ Open in your browser:
 http://your-vps-ip:9801
 ```
 
-Enter the same token, and you'll see the live screen.
+Enter the same token. If using Cloudflare Tunnel, the WebSocket URL will auto-detect. If it doesn't connect, manually enter the WebSocket URL in the field provided.
 
 ### 5. AI Integration (MCP)
 
+The server implements the full MCP protocol (initialize, tools/list, tools/call) so it works with any MCP-compatible client.
+
 Add to your AI client's MCP settings:
-- URL: `http://your-vps-ip:9801/mcp`
+- URL: `http://your-vps-ip:9801/mcp` (or `https://screen.yourdomain.com/mcp`)
 - Authorization: `Bearer your_token`
 
 Available tools:
@@ -114,11 +137,11 @@ Available tools:
 ```
 ┌─────────────┐     WebSocket      ┌─────────────┐     WebSocket      ┌─────────────┐
 │   iPhone    │ ──────────────────> │  VPS Server │ ──────────────────> │  Browser    │
-│  ReplayKit  │   JPEG frames      │  Python     │   base64 frames    │  Viewer     │
-│  Extension  │   ~15 FPS          │  asyncio    │   ~15 FPS          │  Canvas     │
+│  ReplayKit  │   /ws/phone         │  Python     │   /ws/viewer        │  Viewer     │
+│  Extension  │   JPEG ~15 FPS      │  asyncio    │   base64 ~15 FPS    │  Canvas     │
 └─────────────┘                    └─────────────┘                    └─────────────┘
                                          │
-                                         │ HTTP/MCP
+                                    HTTP │ /mcp
                                          ▼
                                    ┌─────────────┐
                                    │  AI Client  │
@@ -126,9 +149,13 @@ Available tools:
                                    └─────────────┘
 ```
 
+Ports:
+- `WS_PORT` (default 9800): WebSocket for phone and viewer
+- `HTTP_PORT` (default 9801): Viewer page, status API, and MCP endpoint
+
 ## Performance
 
-- Frame rate: ~15 FPS (configurable)
+- Frame rate: ~15 FPS (configurable in SampleHandler.swift)
 - Resolution: 50% of original (configurable)
 - JPEG quality: 50% (configurable)
 - Typical bandwidth: ~500KB/s - 1MB/s
@@ -138,7 +165,8 @@ Available tools:
 
 - All connections require token authentication
 - Use Cloudflare Tunnel or HTTPS/WSS in production
-- Token is stored in iOS Keychain via App Group shared UserDefaults
+- Token is stored in App Group shared UserDefaults on iOS (not Keychain)
+- iOS shows a visible broadcast indicator; this is not hidden surveillance
 - Never expose WebSocket port directly without auth
 
 ## License

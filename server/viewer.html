@@ -92,6 +92,8 @@
     }
     #auth-form button:hover { background: #2563eb; }
     #auth-error { color: #f87171; margin-top: 8px; font-size: 13px; display: none; }
+    #ws-url-group { margin-bottom: 12px; }
+    #ws-url-group label { font-size: 12px; color: #666; display: block; margin-bottom: 4px; }
 </style>
 </head>
 <body>
@@ -99,9 +101,13 @@
 <div id="auth-overlay">
     <div id="auth-form">
         <h2>Screen Share Viewer</h2>
+        <div id="ws-url-group">
+            <label>WebSocket URL (leave empty for auto-detect)</label>
+            <input type="text" id="ws-url-input" placeholder="wss://screen-ws.example.com/ws/viewer" />
+        </div>
         <input type="password" id="token-input" placeholder="Enter token" />
         <button onclick="connect()">Connect</button>
-        <div id="auth-error">Connection failed. Check your token.</div>
+        <div id="auth-error">Connection failed. Check your token and WebSocket URL.</div>
     </div>
 </div>
 
@@ -130,10 +136,25 @@ function connect() {
     const token = document.getElementById('token-input').value.trim();
     if (!token) return;
 
-    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // WebSocket connects to the WS_PORT, viewer page is on HTTP_PORT
-    // If behind reverse proxy, adjust accordingly
-    const wsUrl = `${wsProtocol}//${location.hostname}:9800/viewer`;
+    let wsUrl = document.getElementById('ws-url-input').value.trim();
+
+    if (!wsUrl) {
+        // Auto-detect: same hostname, WS_PORT default 9800
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        // If accessed via Cloudflare Tunnel (HTTPS), try /ws/viewer on same host
+        // Otherwise fall back to port 9800
+        if (location.protocol === 'https:') {
+            // Behind reverse proxy: assume /ws is proxied on same hostname
+            wsUrl = `wss://${location.host}/ws/viewer`;
+        } else {
+            wsUrl = `ws://${location.hostname}:9800/ws/viewer`;
+        }
+    }
+
+    // Ensure path ends with /ws/viewer
+    if (!wsUrl.includes('/ws/viewer')) {
+        wsUrl = wsUrl.replace(/\/$/, '') + '/ws/viewer';
+    }
 
     try {
         ws = new WebSocket(wsUrl);
@@ -170,7 +191,6 @@ function connect() {
 
     ws.onclose = () => {
         updateStatus(false);
-        // Auto reconnect after 3s
         setTimeout(() => {
             if (token) connect();
         }, 3000);
@@ -180,7 +200,6 @@ function connect() {
         document.getElementById('auth-error').style.display = 'block';
     };
 
-    // FPS counter
     if (fpsInterval) clearInterval(fpsInterval);
     let lastCount = 0;
     fpsInterval = setInterval(() => {
@@ -201,13 +220,11 @@ function updateStatus(active) {
     }
 }
 
-// Auto-connect if token in URL hash
 if (location.hash) {
     document.getElementById('token-input').value = location.hash.slice(1);
     connect();
 }
 
-// Enter key to connect
 document.getElementById('token-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') connect();
 });
